@@ -1,13 +1,6 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: Enable logs to elasticsearch
 Parameters:
-  LambdaArtifactBucketName:
-    Description: The bucket where the lambda function located
-    Type: String
-  LambdaArtifactName:
-    Description: The name of the lambda zipped file
-    Type: String
-    Default: LogsToElasticsearch.zip
   Email:
     Description: Enter the email address where you want to get email about drift scan result.(please check your email for verification after this cft is deployed)
     Type: String
