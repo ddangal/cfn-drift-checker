@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Enable logs to elasticsearch
+Parameters:
+  LambdaArtifactBucketName:
+    Description: The bucket where the lambda function located
+    Type: String
+  LambdaArtifactName:
+    Description: The name of the lambda zipped file
+    Type: String
+    Default: LogsToElasticsearch.zip
+  Email:
+    Description: Enter the email address where you want to get email about drift scan result.(please check your email for verification after this cft is deployed)
+    Type: String
+    Default: abc@abc.com
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/AdministratorAccess']
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: LambdaExecutionRole
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+
+          import os
+
+          sns_topic_arn=os.environ['sns_arn']
+          print(sns_topic_arn)
+
+          def lambda_handler(event, context):
+
+              cloudformationClient = boto3.client("cloudformation")
+              stacks = cloudformationClient.describe_stacks()['Stacks']
+              
+              drift_details = {}
+              for stack in stacks:
+                  if str(stack['DriftInformation']['StackDriftStatus']) == "DRIFTED":
+                      try:
+                          response = cloudformationClient.describe_stack_resource_drifts(
+                              StackName=stack['StackName']
+                          )
+                          each_drift_detail=[]
+                          for drift in response['StackResourceDrifts']:
+                              if drift['StackResourceDriftStatus'] != 'IN_SYNC':
+                                  trail_client = boto3.client('cloudtrail')
+                                  response = trail_client.lookup_events(
+                                      LookupAttributes=[
+                                          {
+                                              'AttributeKey': 'ResourceName',
+                                              'AttributeValue': drift['PhysicalResourceId']
+                                          },
+                                      ]
+                                  )
+                                  print(response['Events'])
+                                  if(len(response['Events']) == 0):
+                                      each_drift_detail.append({"DRIFT_STATUS":drift['StackResourceDriftStatus'],"SERVICE_NAME":drift['ResourceType'],"RESOURCE_NAME":drift['PhysicalResourceId']})
+                                  else:
+                                      each_drift_detail.append({"DRIFT_STATUS":drift['StackResourceDriftStatus'],"SERVICE_NAME":drift['ResourceType'],"RESOURCE_NAME":drift['PhysicalResourceId'], "LAST_CHANGED_BY":response['Events'][0]['Username'], "CHANGE_ACTIVITY":response['Events'][0]['EventName']})
+                          drift_details[stack['StackName']] = each_drift_detail
+                      except Exception as e:
+                          print(e)
+                  
+                  if str(stack['DriftInformation']['StackDriftStatus']) == "NOT_CHECKED":
+                      try:
+                          detection_id = cloudformationClient.detect_stack_drift(StackName=stack['StackName'])['StackDriftDetectionId']
+                          response = cloudformationClient.describe_stack_drift_detection_status(
+                              StackDriftDetectionId=detection_id
+                          )
+                          print(response)
+                          while response['DetectionStatus'] == 'DETECTION_IN_PROGRESS':
+                              time.sleep(3)
+                              response = cloudformationClient.describe_stack_drift_detection_status(
+                                  StackDriftDetectionId=detection_id
+                              )
+                          if response['StackDriftStatus'] == 'DRIFTED':
+                              response = cloudformationClient.describe_stack_resource_drifts(
+                                  StackName=stack['StackName']
+                              )
+                              each_drift_detail=[]
+                              for drift in response['StackResourceDrifts']:
+                                  if drift['StackResourceDriftStatus'] != 'IN_SYNC':
+                                      trail_client = boto3.client('cloudtrail')
+                                      response = trail_client.lookup_events(
+                                          LookupAttributes=[
+                                              {
+                                                  'AttributeKey': 'ResourceName',
+                                                  'AttributeValue': drift['PhysicalResourceId']
+                                              },
+                                          ]
+                                      )
+                                      if(len(response['Events']) == 0):
+                                          each_drift_detail.append(drift['ResourceType']+ ' with Id '+ drift['PhysicalResourceId']+ ' is '+ drift['StackResourceDriftStatus']+'.')
+                                      else:
+                                          each_drift_detail.append(drift['ResourceType']+ ' with Id '+ drift['PhysicalResourceId']+ ' is '+ drift['StackResourceDriftStatus']+'. Last changes made by user '+response['Events'][0]['Username'] +' is '+response['Events'][0]['EventName'])
+                              drift_details[stack['StackName']] = each_drift_detail
+                      except Exception as e:
+                          print(e)
+                  
+              print(drift_details)
+              
+              if len(drift_details) != 0:
+                  try:
+                      sns_client = boto3.client('sns')
+                      response = sns_client.publish(
+                          TargetArn=sns_topic_arn,
+                          Message=json.dumps(drift_details, indent=4, sort_keys=True),
+                          Subject='Cloudformation Drift Information'
+                      )
+                  except Exception as e:
+                      print(e)
+              return "tetsst"
+
+      Handler: lambda_function.lambda_handler
+      Role:
+        'Fn::GetAtt':
+          - LambdaExecutionRole
+          - Arn
+      Runtime: python3.7
+      Timeout: '600'
+      MemorySize: 512
+      Environment: 
+        Variables:
+          sns_arn: !Ref MySNSTopic
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref Email
+          Protocol: "email"
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: "cron(0 12 ? * * *)"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "LambdaFunction"
+              - "Arn"
+          Id: "1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "LambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule"
+          - "Arn"
+Outputs:
+  RoleArn:
+    Value:
+      'Fn::GetAtt':
+        - LambdaExecutionRole
+        - Arn
