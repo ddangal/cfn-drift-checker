@@ -118,7 +118,7 @@ Resources:
                       print(e)
               return "tetsst"
 
-      Handler: lambda_function.lambda_handler
+      Handler: index.lambda_handler
       Role:
         'Fn::GetAtt':
           - LambdaExecutionRole
